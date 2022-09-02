@@ -1,0 +1,6 @@
+.DS_Store
+dollop
+test*.log
+
+# Ignore for now
+screenshots

@@ -6,8 +6,8 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/elseano/sl/internal/config"
-	"github.com/elseano/sl/internal/tui"
+	"github.com/elseano/dollop/internal/config"
+	"github.com/elseano/dollop/internal/tui"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -30,6 +30,8 @@ var rootCmd = &cobra.Command{
 		p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 		if err := p.Start(); err != nil {
 			log.Fatal("start failed: ", err)
+		} else {
+			fmt.Println("Dollop Closed.\nSource process may still be running and require an additional ctrl+c to exit.")
 		}
 	},
 }
@@ -47,7 +49,7 @@ func init() {
 	cobra.OnInitialize(initConfig)
 
 	rootCmd.PersistentFlags().
-		StringVarP(&cfgFile, "config", "c", "", "config file (default is ./.smart-log.yaml)")
+		StringVarP(&cfgFile, "config", "c", "", "config file (default is ./.dollop.yaml)")
 }
 
 // initConfig reads in config file and ENV variables if set.
@@ -60,11 +62,11 @@ func initConfig() {
 		home, err := os.UserHomeDir()
 		cobra.CheckErr(err)
 
-		// Search config in home directory with name ".smart-log" (without extension).
+		// Search config in home directory with name ".dollop" (without extension).
 		viper.AddConfigPath(".")
 		viper.AddConfigPath(home)
 		viper.SetConfigType("yaml")
-		viper.SetConfigName(".smart-log")
+		viper.SetConfigName(".dollop")
 	}
 
 	viper.AutomaticEnv() // read in environment variables that match

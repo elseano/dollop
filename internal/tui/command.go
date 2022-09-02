@@ -3,23 +3,39 @@ package tui
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/elseano/sl/internal/config"
+	"github.com/elseano/dollop/internal/config"
+	"github.com/elseano/dollop/internal/templating"
 )
 
 type scanMsg struct {
-	lines []list.Item
+	lines  []list.Item
+	status string
 }
+
+type disconnectedMsg struct{}
+
+var scanMutex = sync.Mutex{}
 
 func (m Model) scanLogs() tea.Cmd {
 	return func() tea.Msg {
-		processLog(m.config)
+		scanMutex.Lock()
+		status, err := processLog(m.config)
+
+		if err != nil {
+			return disconnectedMsg{}
+		}
+
 		disp := []list.Item{}
 
 		for _, v := range itemsCache {
@@ -27,58 +43,89 @@ func (m Model) scanLogs() tea.Cmd {
 		}
 
 		sort.Slice(disp, func(i, j int) bool {
-			return disp[i].(*item).timestamp.Sub(disp[j].(*item).timestamp) > 0
+			diff := disp[i].(*logGroup).timestamp.Sub(disp[j].(*logGroup).timestamp)
+
+			if diff == 0 {
+				return strings.Compare(disp[i].(*logGroup).title, disp[j].(*logGroup).title) > 0
+			} else {
+				return diff > 0
+			}
 		})
 
-		return scanMsg{lines: disp}
+		scanMutex.Unlock()
+
+		return scanMsg{lines: disp, status: status}
 	}
 }
 
-var scanner = bufio.NewReader(os.Stdin)
 var itemsCache = map[string]list.Item{
-	"errors": &item{
-		title:     "Errors",
-		timestamp: time.Now(),
+	"errors": &logGroup{
+		title:       "Parse Failures",
+		description: "Errors",
+		timestamp:   time.Now(),
 	},
 }
 
-func processLog(config config.Config) {
+var scanner *bufio.Reader
+
+func processLog(config config.Config) (status string, err error) {
+	if scanner == nil {
+		scanner = bufio.NewReaderSize(os.Stdin, 1048576)
+	}
 
 	line, err := scanner.ReadString('\n')
 
-	if err == nil {
+	if err == nil && line != "" {
 		var res map[string]interface{}
 		if err := json.Unmarshal([]byte(line), &res); err == nil {
-			groupValue, groupTitle, specName := getGroupAndTitle(config, res)
+			groupValue, groupTitle, groupSpec := getGroupAndTitle(config, res)
 			timestamp := getTimestamp(config, res)
+			status = getStatus(config, res)
 
-			if groupValue == "" {
+			var specName string
+
+			if groupSpec == nil {
 				groupValue = "nogroup"
 				groupTitle = "No Group"
+				specName = "Ungrouped"
+			} else {
+				specName = groupSpec.Name
 			}
 
 			cache, exists := itemsCache[groupValue]
 			if !exists {
-				cache = &item{
+				cache = &logGroup{
 					title:       groupTitle,
 					description: specName,
-					timestamp:   timestamp,
+					groupValue:  groupValue,
 				}
 				itemsCache[groupValue] = cache
 			}
 
-			message, ok := res[config.MessageField].(string)
-			if !ok {
-				message = fmt.Sprintf("Field %s not found in data", config.MessageField)
+			message, err := templating.ApplyTemplate(config.MessageTmpl, res)
+			if err != nil {
+				message = fmt.Sprintf("Field %s not found in data: %s", config.MessageField, err.Error())
 			}
 
-			tcache := cache.(*item)
-			tcache.lines = append(tcache.lines, logLine{
-				message: message,
-				data:    res,
-			})
-		} else {
-			tcache := itemsCache["errors"].(*item)
+			tcache := cache.(*logGroup)
+			tcache.timestamp = timestamp
+
+			logLine := logLine{
+				message:   message,
+				data:      res,
+				level:     getLevel(config, res),
+				timestamp: timestamp,
+			}
+
+			if groupSpec == nil {
+				logLine.tags = getTags(config.Tags, res)
+			} else {
+				logLine.tags = getTags(append(config.Tags, groupSpec.Tags...), res)
+			}
+
+			tcache.lines = append(tcache.lines, logLine)
+		} else if !errors.Is(err, io.EOF) {
+			tcache := itemsCache["errors"].(*logGroup)
 			tcache.lines = append(tcache.lines, logLine{
 				message: fmt.Sprintf("Error loading '%s': %s", line, err.Error()),
 				data:    res,
@@ -86,15 +133,29 @@ func processLog(config config.Config) {
 
 		}
 	}
+
+	return
 }
 
-func getGroupAndTitle(config config.Config, line map[string]interface{}) (value string, title string, name string) {
+func getGroupAndTitle(config config.Config, line map[string]interface{}) (value string, title string, spec *config.GroupSpec) {
 	for _, spec := range config.Groups {
-		currentValue, valueOk := line[spec.ValueField].(string)
-		currentTitle, titleOk := line[spec.TitleField].(string)
+		currentValue, valueErr := templating.ApplyTemplate(spec.ValueTmpl, line)
+		currentTitle, titleErr := templating.ApplyTemplate(spec.TitleTmpl, line)
 
-		if valueOk && titleOk {
-			return currentValue, currentTitle, spec.Name
+		if valueErr == nil && titleErr == nil && currentValue != "" && currentTitle != "" {
+			return currentValue, currentTitle, spec
+		}
+	}
+
+	return
+}
+
+func getStatus(config config.Config, line map[string]interface{}) (status string) {
+	for _, spec := range config.Statuses {
+		currentDisplay, displayErr := templating.ApplyTemplate(spec.DisplayTmpl, line)
+
+		if displayErr == nil && currentDisplay != "" {
+			return currentDisplay
 		}
 	}
 
@@ -102,8 +163,9 @@ func getGroupAndTitle(config config.Config, line map[string]interface{}) (value 
 }
 
 func getTimestamp(config config.Config, line map[string]interface{}) time.Time {
-	timestampStr, ok := line[config.TimestampField].(string)
-	if ok {
+	timestampStr, err := templating.ApplyTemplate(config.TimestampTmpl, line)
+
+	if err == nil && timestampStr != "" {
 		t, err := time.Parse(time.RFC3339, timestampStr)
 		if err == nil {
 			return t
@@ -111,4 +173,42 @@ func getTimestamp(config config.Config, line map[string]interface{}) time.Time {
 	}
 
 	return time.Now()
+}
+
+func getLevel(config config.Config, line map[string]interface{}) string {
+	level, err := templating.ApplyTemplate(config.LevelTmpl, line)
+	if err == nil {
+		return level
+	} else {
+		return "unknown"
+	}
+}
+
+func getTags(tags []*config.TagSpec, line map[string]interface{}) []logTag {
+	result := []logTag{}
+	tagsAlready := map[string]struct{}{}
+
+	for _, tagSpec := range tags {
+		key, err := templating.ApplyTemplate(tagSpec.KeyTmpl, line)
+		if err != nil || key == "" {
+			continue
+		}
+
+		if _, ok := tagsAlready[key]; ok {
+			continue
+		}
+
+		if tagSpec.ValueTmpl != nil {
+			value, err := templating.ApplyTemplate(tagSpec.ValueTmpl, line)
+			if err == nil && value != "" {
+				result = append(result, logTag{name: key, value: value})
+				tagsAlready[key] = struct{}{}
+			}
+		} else {
+			result = append(result, logTag{name: key})
+			tagsAlready[key] = struct{}{}
+		}
+	}
+
+	return result
 }
