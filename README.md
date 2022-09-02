@@ -50,6 +50,13 @@ groups:
   - valueField: category
     titleField: category
     name: Category
+
+statuses:
+  # Set the status bar to display certain key messages
+  - display: "{{ if HasPrefix .msg `Running HTTP Server` }}{{ .msg }}{{end}}"
+  - display: "{{ if HasPrefix .msg `Waiting for messages...` }}Message queue ready{{end}}"
+
+
 ```
 
 
