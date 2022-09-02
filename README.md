@@ -52,3 +52,19 @@ groups:
     name: Category
 ```
 
+
+### Running
+
+With dollop configured, just pipe your app's log into it:
+
+``` bash
+./my-cool-app | dollop
+```
+
+Dollop will appear and start populating the log view.
+
+![requests](./screenshots/request_view.jpg)
+
+Select a log entry to view it's metadata.
+
+![metadata](./screenshots/metadata.jpg)
