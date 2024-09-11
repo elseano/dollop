@@ -64,6 +64,11 @@ var itemsCache = map[string]list.Item{
 		description: "Errors",
 		timestamp:   time.Now(),
 	},
+	"not-json": &logGroup{
+		title:       "Text",
+		description: "Not JSON",
+		timestamp:   time.Now(),
+	},
 }
 
 var scanner *bufio.Reader
@@ -75,64 +80,82 @@ func processLog(config config.Config) (status string, err error) {
 
 	line, err := scanner.ReadString('\n')
 
-	if err == nil && line != "" {
-		var res map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &res); err == nil {
-			groupValue, groupTitle, groupSpec := getGroupAndTitle(config, res)
-			timestamp := getTimestamp(config, res)
-			status = getStatus(config, res)
+	if err != nil {
+		return "", err
+	}
 
-			var specName string
+	jsonIdx := strings.Index(line, "{")
 
-			if groupSpec == nil {
-				groupValue = "nogroup"
-				groupTitle = "No Group"
-				specName = "Ungrouped"
-			} else {
-				specName = groupSpec.Name
-			}
+	if jsonIdx == -1 {
+		tcache := itemsCache["not-json"].(*logGroup)
+		tcache.lines = append(tcache.lines, logLine{
+			message: line,
+			data:    nil,
+		})
 
-			cache, exists := itemsCache[groupValue]
-			if !exists {
-				cache = &logGroup{
-					title:       groupTitle,
-					description: specName,
-					groupValue:  groupValue,
-				}
-				itemsCache[groupValue] = cache
-			}
+		return
+	}
 
-			message, err := templating.ApplyTemplate(config.MessageTmpl, res)
-			if err != nil {
-				message = fmt.Sprintf("Field %s not found in data: %s", config.MessageField, err.Error())
-			}
-
-			tcache := cache.(*logGroup)
-			tcache.timestamp = timestamp
-
-			logLine := logLine{
-				message:   message,
-				data:      res,
-				level:     getLevel(config, res),
-				timestamp: timestamp,
-			}
-
-			if groupSpec == nil {
-				logLine.tags = getTags(config.Tags, res)
-			} else {
-				logLine.tags = getTags(append(config.Tags, groupSpec.Tags...), res)
-			}
-
-			tcache.lines = append(tcache.lines, logLine)
-		} else if !errors.Is(err, io.EOF) {
+	var res map[string]interface{}
+	err = json.Unmarshal([]byte(line[jsonIdx:]), &res)
+	if err != nil {
+		if !errors.Is(err, io.EOF) {
 			tcache := itemsCache["errors"].(*logGroup)
 			tcache.lines = append(tcache.lines, logLine{
 				message: fmt.Sprintf("Error loading '%s': %s", line, err.Error()),
 				data:    res,
 			})
-
 		}
+
+		return
 	}
+
+	groupValue, groupTitle, groupSpec := getGroupAndTitle(config, res)
+	timestamp := getTimestamp(config, res)
+	status = getStatus(config, res)
+
+	var specName string
+
+	if groupSpec == nil {
+		groupValue = "nogroup"
+		groupTitle = "No Group"
+		specName = "Ungrouped"
+	} else {
+		specName = groupSpec.Name
+	}
+
+	cache, exists := itemsCache[groupValue]
+	if !exists {
+		cache = &logGroup{
+			title:       groupTitle,
+			description: specName,
+			groupValue:  groupValue,
+		}
+		itemsCache[groupValue] = cache
+	}
+
+	message, err := templating.ApplyTemplate(config.MessageTmpl, res)
+	if err != nil {
+		message = fmt.Sprintf("Field %s not found in data: %s", config.MessageField, err.Error())
+	}
+
+	tcache := cache.(*logGroup)
+	tcache.timestamp = timestamp
+
+	logLine := logLine{
+		message:   message,
+		data:      res,
+		level:     getLevel(config, res),
+		timestamp: timestamp,
+	}
+
+	if groupSpec == nil {
+		logLine.tags = getTags(config.Tags, res)
+	} else {
+		logLine.tags = getTags(append(config.Tags, groupSpec.Tags...), res)
+	}
+
+	tcache.lines = append(tcache.lines, logLine)
 
 	return
 }
